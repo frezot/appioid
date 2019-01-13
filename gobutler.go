@@ -10,20 +10,16 @@ import "regexp"
 import "time"
 import "runtime"
 
+// State is an unexported type
 type State struct {
 	free bool
 	dob  time.Time
 }
 
-var dPool = make(map[string]State)
-var aPool = map[string]State{
-	//TODO: set pool size as env var, and/or change via comand
-	"4724": State{true, time.Now()},
-	"4725": State{true, time.Now()},
-	"4726": State{true, time.Now()},
-	"4727": State{true, time.Now()},
-}
+var devicesPool = make(map[string]State)
+var portsPool = make(map[string]State)
 var bysyLimit = 180 * time.Second
+var unsupportedOsError = "Sory, not implemented for UNIX systems yet"
 
 func defaultAction(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w,
@@ -39,8 +35,8 @@ func defaultAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func debug(w http.ResponseWriter, r *http.Request) {
-	log.Println(dPool)
-	log.Println(aPool)
+	log.Println(devicesPool)
+	log.Println(portsPool)
 }
 
 func releaseDevice(w http.ResponseWriter, r *http.Request) {
@@ -54,9 +50,9 @@ func releaseDevice(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n_host_/releaseDevice?name={deviceName}")
 	} else {
-		_, matched := dPool[target]
+		_, matched := devicesPool[target]
 		if matched {
-			dPool[target] = State{free: true, dob: time.Now()}
+			devicesPool[target] = State{free: true, dob: time.Now()}
 			fmt.Fprintf(w, "OK")
 		} else {
 			fmt.Fprintf(w, "UNKNOWN")
@@ -75,9 +71,9 @@ func releasePort(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n_host_/releasePort?port={number}")
 	} else {
-		_, matched := aPool[target]
+		_, matched := portsPool[target]
 		if matched {
-			aPool[target] = State{free: true, dob: time.Now()}
+			portsPool[target] = State{free: true, dob: time.Now()}
 			cleanUpAppiumProcesses()
 			fmt.Fprintf(w, "OK")
 		} else {
@@ -99,7 +95,7 @@ func rereadDevices(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "Actual devices list:\n")
 	fmt.Fprintf(w, "----------------------------\n")
-	for d := range dPool {
+	for d := range devicesPool {
 		fmt.Fprintf(w, "| %-25s|\n", d)
 	}
 	fmt.Fprintf(w, "----------------------------")
@@ -112,9 +108,9 @@ func forceCleanUp(w http.ResponseWriter, r *http.Request) {
 
 func findFreeDevice() string {
 	//TODO: actualise list here in case of some changes on PC
-	for name, _ := range dPool {
-		if dPool[name].free == true || time.Now().Sub(dPool[name].dob) > bysyLimit {
-			dPool[name] = State{free: false, dob: time.Now()}
+	for name := range devicesPool {
+		if devicesPool[name].free == true || time.Now().Sub(devicesPool[name].dob) > bysyLimit {
+			devicesPool[name] = State{free: false, dob: time.Now()}
 			return name
 		}
 	}
@@ -123,12 +119,12 @@ func findFreeDevice() string {
 
 func findFreePort() string {
 	cleanUpAppiumProcesses()
-	for port, _ := range aPool {
-		if aPool[port].free == true {
-			aPool[port] = State{free: false, dob: time.Now()}
+	for port := range portsPool {
+		if portsPool[port].free == true {
+			portsPool[port] = State{free: false, dob: time.Now()}
 			return port
-		} else if time.Now().Sub(aPool[port].dob) > bysyLimit {
-			aPool[port] = State{free: true, dob: time.Now()}
+		} else if time.Now().Sub(portsPool[port].dob) > bysyLimit {
+			portsPool[port] = State{free: true, dob: time.Now()}
 			cleanUpAppiumProcesses()
 		}
 	}
@@ -136,6 +132,11 @@ func findFreePort() string {
 }
 
 func initialLoad() {
+	//TODO: reads and apply portsPool size from env or args
+	portsPool["4724"] = State{true, time.Now()}
+	portsPool["4725"] = State{true, time.Now()}
+	portsPool["4726"] = State{true, time.Now()}
+	portsPool["4727"] = State{true, time.Now()}
 	cleanUpAppiumProcesses()
 	loadDevices()
 }
@@ -147,31 +148,31 @@ func loadDevices() {
 	r, _ := regexp.Compile(`(.*)\s+device\s`)
 	devs := r.FindAllStringSubmatch(cmdRes, -1)
 
-	adb_listing := make(map[string]struct{})
+	adbListing := make(map[string]struct{})
 
 	for _, elem := range devs {
 		devName := elem[1] // first group from regexp match
-		adb_listing[devName] = struct{}{}
+		adbListing[devName] = struct{}{}
 
-		_, registred := dPool[devName]
+		_, registred := devicesPool[devName]
 		// if detected device yet not registred in pool -> write down
 		if !registred {
-			dPool[devName] = State{true, time.Now()}
+			devicesPool[devName] = State{true, time.Now()}
 		}
 	}
 
-	for devFromPool := range dPool {
-		_, online := adb_listing[devFromPool]
+	for devFromPool := range devicesPool {
+		_, online := adbListing[devFromPool]
 		// if device were disconnected -> remove from pool
 		if !online {
-			delete(dPool, devFromPool)
+			delete(devicesPool, devFromPool)
 		}
 	}
 }
 
 func cleanUpAppiumProcesses() {
-	for port, _ := range aPool {
-		if aPool[port].free == true {
+	for port := range portsPool {
+		if portsPool[port].free == true {
 			outlawPid := getProcessByPort(port)
 			if outlawPid != "" {
 				killPid(outlawPid)
@@ -200,10 +201,9 @@ func getProcessByPort(p string) string {
 		}
 		pid := r.FindStringSubmatch(string(out))[1]
 		return pid
-	} else {
-		log.Fatal("Not implemented for UNIX systems yet")
-		return "ERROR"
 	}
+	log.Fatal(unsupportedOsError)
+	return ""
 }
 
 func killPid(id string) {
@@ -214,7 +214,7 @@ func killPid(id string) {
 			log.Println("[DONE] taskkill /pid " + id)
 		}
 	} else {
-		log.Fatal("Not implemented for UNIX systems yet")
+		log.Fatal(unsupportedOsError)
 	}
 }
 
