@@ -1,4 +1,4 @@
-# goButler
+# Appiod
 Tool for manage android devices and appium servers
 
 ## Идея коротко:
@@ -17,3 +17,8 @@ Tool for manage android devices and appium servers
 
 
 Приблизительно поэтому было решено написать данную тулзу
+
+## Requirements
+* add path to android platform-tools [ReadMore](https://stackoverflow.com/questions/20564514/adb-is-not-recognized-as-an-internal-or-external-command-operable-program-or)
+* npm (https://www.npmjs.com/get-npm)
+* appium CLI (npm install -g appium)
