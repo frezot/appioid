@@ -1,16 +1,21 @@
 package main
 
-import "fmt"
-import "net/http"
-import "strings"
-import "strconv"
-import "log"
-import "os/exec"
-import "regexp"
-import "time"
-import "runtime"
-import "io/ioutil"
-import "flag"
+import (
+	"flag"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net"
+	"net/http"
+	"os/exec"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/net/netutil"
+)
 
 // appiumState is an unexported type
 type appiumState struct {
@@ -27,12 +32,11 @@ type deviceState struct {
 
 var devicesPool = make(map[string]deviceState)
 var appiumsPool = make(map[string]appiumState)
-var portCounter = 4724
-var busyLimit = 180 * time.Second
-var poolSize = 2
-var reservedDevice = "WilNotBeUsedInPool"
+
+var poolSize, portCounter, ttl int
+var appiodPort, reservedDevice string
+
 var host = "http://127.0.0.1"
-var appiodPort = ":9090"
 var timeFormat = "15:04:05"
 var unsupportedOsError = "Sory, not implemented for UNIX systems yet 😰"
 var restartInProgress = false
@@ -55,6 +59,10 @@ func defaultAction(w http.ResponseWriter, r *http.Request) {
 func debug(w http.ResponseWriter, r *http.Request) {
 	log.Println(devicesPool)
 	log.Println(appiumsPool)
+}
+
+func busyLimit() time.Duration {
+	return time.Duration(ttl) * time.Second
 }
 
 func getDevice(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +107,7 @@ func stopAppium(w http.ResponseWriter, r *http.Request) {
 func status(w http.ResponseWriter, r *http.Request) {
 	loadDevices()
 
-	fmt.Fprintf(w, "\nActual appiums list:\n")
+	fmt.Fprintf(w, "⌚️ %s\n\nActual appiums list:\n", time.Now().Format(timeFormat))
 	fmt.Fprintf(w, "|==============URL==============|=free?=|\n")
 	for a := range appiumsPool {
 		fmt.Fprintf(w, "| %-30s| %-5t | %s\n", appiumServerURL(a), appiumsPool[a].free, appiumStatus(a))
@@ -148,17 +156,17 @@ func appiumSetBusy(key string) {
 func deviceSetFree(devicename string) string {
 	_, matched := devicesPool[devicename]
 	if matched {
-		adbPort := devicesPool[devicename].port
-		killProcess(adbPort)
-		devicesPool[devicename] = deviceState{free: true, port: adbPort, dob: time.Now()}
+		systemPort := devicesPool[devicename].port
+		killProcess(systemPort)
+		devicesPool[devicename] = deviceState{free: true, port: systemPort, dob: time.Now()}
 		return "OK"
 	}
 	return "UNKNOWN DEVICE NAME"
 }
 
 func deviceSetBusy(devicename string) {
-	adbPort := devicesPool[devicename].port
-	devicesPool[devicename] = deviceState{free: false, port: adbPort, dob: time.Now()}
+	systemPort := devicesPool[devicename].port
+	devicesPool[devicename] = deviceState{free: false, port: systemPort, dob: time.Now()}
 }
 
 func appiumStatus(port string) string {
@@ -200,7 +208,8 @@ func discoverFreeAppium() string {
 			tryToRestart(port)
 			continue
 		}
-		if !appiumsPool[port].free && time.Now().Sub(appiumsPool[port].dob) > busyLimit {
+		if !appiumsPool[port].free && time.Now().Sub(appiumsPool[port].dob) > busyLimit() {
+			log.Printf("[WARN] appium:%s TTL elapsed", port)
 			tryToRestart(port)
 			continue
 		}
@@ -274,7 +283,8 @@ func loadDevices() {
 
 	// stage3: check for devices which is busy more than busyLimit
 	for actualDevice := range devicesPool {
-		if time.Now().Sub(devicesPool[actualDevice].dob) > busyLimit {
+		if !devicesPool[actualDevice].free && time.Now().Sub(devicesPool[actualDevice].dob) > busyLimit() {
+			log.Printf("[WARN] device '%s' TTL elapsed", actualDevice)
 			deviceSetFree(actualDevice)
 		}
 	}
@@ -329,8 +339,11 @@ func tryToRestart(appiumPort string) {
 
 func main() {
 
-	flag.IntVar(&poolSize, "s", 1, "How much appium servers should works at same time")
-	flag.StringVar(&reservedDevice, "d", "", "You can set the device-name which shouldnt be used")
+	flag.StringVar(&appiodPort, "p", ":9093", "Port to listen on, don't forget colon at start")
+	flag.StringVar(&reservedDevice, "rd", "", "Reserved device (never be returned by /getDevice)")
+	flag.IntVar(&poolSize, "sz", 1, "How much appium servers should works at same time")
+	flag.IntVar(&portCounter, "first", 4725, "First value of portCounter")
+	flag.IntVar(&ttl, "TTL", 300, "Max time (in seconds) which node or device might be in use")
 	flag.Parse()
 
 	http.HandleFunc("/", defaultAction)
@@ -345,8 +358,15 @@ func main() {
 	http.HandleFunc("/forceCleanUp", forceCleanUp)
 
 	initialLoad()
-	err := http.ListenAndServe(appiodPort, nil)
+
+	flow, err := net.Listen("tcp", appiodPort)
 	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+		log.Fatal("Listen: ", err)
 	}
+	defer flow.Close()
+
+	flow = netutil.LimitListener(flow, 1)
+
+	log.Fatal(http.Serve(flow, nil))
+
 }
