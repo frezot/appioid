@@ -7,15 +7,20 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/netutil"
 )
+
+// appVersion is the current application version
+const appVersion = "0.93"
 
 // appiumState is an unexported type
 type appiumState struct {
@@ -35,11 +40,11 @@ var appiumsPool = make(map[string]appiumState)
 
 var poolSize, portCounter, ttl int
 var appiodPort, reservedDevice string
+var busyLimit time.Duration
 
 var host = "http://127.0.0.1"
 var timeFormat = "15:04:05"
 var unsupportedOsError = "Sory, not implemented for UNIX systems yet 😰"
-var restartInProgress = false
 
 func defaultAction(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w,
@@ -54,15 +59,6 @@ func defaultAction(w http.ResponseWriter, r *http.Request) {
 			host+appiodPort+"/status\n"+
 			host+appiodPort+"/forceCleanUp\n"+
 			"===========================================================")
-}
-
-func debug(w http.ResponseWriter, r *http.Request) {
-	log.Println(devicesPool)
-	log.Println(appiumsPool)
-}
-
-func busyLimit() time.Duration {
-	return time.Duration(ttl) * time.Second
 }
 
 func getDevice(w http.ResponseWriter, r *http.Request) {
@@ -127,9 +123,17 @@ func forceCleanUp(w http.ResponseWriter, r *http.Request) {
 	begin := time.Now().Format(timeFormat)
 
 	log.Printf("==> [START] Force restart <==")
+
+	var wg sync.WaitGroup
+	wg.Add(len(appiumsPool))
 	for port := range appiumsPool {
-		tryToRestart(port)
+		go func(p string) {
+			defer wg.Done()
+			restart(p)
+		}(port)
 	}
+	wg.Wait()
+
 	loadDevices()
 	for d := range devicesPool {
 		deviceSetFree(d)
@@ -181,7 +185,9 @@ func appiumStatus(port string) string {
 
 func appiumIsReady(port string) bool {
 
-	for i := 0; i < 7; i++ {
+	singleLatency := 6 //experimentally established value
+
+	for i := 0; i < singleLatency*poolSize; i++ {
 		if appiumStatus(port) == "ERR" {
 			time.Sleep(500 * time.Millisecond)
 		} else {
@@ -205,12 +211,12 @@ func discoverFreeDevice() string {
 func discoverFreeAppium() string {
 	for port := range appiumsPool {
 		if appiumStatus(port) == "ERR" {
-			tryToRestart(port)
+			restart(port)
 			continue
 		}
-		if !appiumsPool[port].free && time.Now().Sub(appiumsPool[port].dob) > busyLimit() {
+		if !appiumsPool[port].free && time.Now().Sub(appiumsPool[port].dob) > busyLimit {
 			log.Printf("[WARN] appium:%s TTL elapsed", port)
-			tryToRestart(port)
+			restart(port)
 			continue
 		}
 		if appiumsPool[port].free {
@@ -229,11 +235,11 @@ func startAppiumNode(port string) {
 	cmd := exec.Command("appium", "-p", port, "--log-level", "error")
 	if err := cmd.Start(); err == nil {
 		if appiumIsReady(port) {
-			log.Printf("[DONE] appium started on " + port)
-			appiumsPool[port] = appiumState{true, time.Now()}
+			log.Printf("[DONE] appium:%s started", port)
+			appiumsPool[port] = appiumState{free: true, dob: time.Now()}
 		} else {
-			log.Printf("[ERROR] Failed to start appium on %s port", port)
-			killProcess(port)
+			log.Printf("[ERROR] appium:%s started but not responding", port)
+			appiumsPool[port] = appiumState{free: false, dob: time.Now().Add(-1 * time.Hour)}
 		}
 	} else {
 		log.Printf("[ERROR] Failed to start cmd: %v", err)
@@ -242,10 +248,19 @@ func startAppiumNode(port string) {
 
 func initialLoad() {
 
+	log.Printf("[INIT] appioid started")
+
+	var wg sync.WaitGroup
+	wg.Add(poolSize)
 	for i := 0; i < poolSize; i++ {
-		startAppiumNode(strconv.Itoa(portCounter))
+		go func(num int) {
+			defer wg.Done()
+			startAppiumNode(strconv.Itoa(num))
+		}(portCounter)
 		portCounter++
 	}
+	wg.Wait()
+
 	loadDevices()
 }
 
@@ -283,7 +298,7 @@ func loadDevices() {
 
 	// stage3: check for devices which is busy more than busyLimit
 	for actualDevice := range devicesPool {
-		if !devicesPool[actualDevice].free && time.Now().Sub(devicesPool[actualDevice].dob) > busyLimit() {
+		if !devicesPool[actualDevice].free && time.Now().Sub(devicesPool[actualDevice].dob) > busyLimit {
 			log.Printf("[WARN] device '%s' TTL elapsed", actualDevice)
 			deviceSetFree(actualDevice)
 		}
@@ -326,19 +341,14 @@ func killProcess(port string) {
 	killPid(getPidByPort(port))
 }
 
-func tryToRestart(appiumPort string) {
-	if restartInProgress {
-		log.Println("tryToRestart(" + appiumPort + ") failed. Locked")
-	} else {
-		restartInProgress = true
-		killProcess(appiumPort)
-		startAppiumNode(appiumPort)
-		restartInProgress = false
-	}
+func restart(appiumPort string) {
+	killProcess(appiumPort)
+	startAppiumNode(appiumPort)
 }
 
 func main() {
 
+	version := flag.Bool("v", false, "Prints current appioid version")
 	flag.StringVar(&appiodPort, "p", ":9093", "Port to listen on, don't forget colon at start")
 	flag.StringVar(&reservedDevice, "rd", "", "Reserved device (never be returned by /getDevice)")
 	flag.IntVar(&poolSize, "sz", 1, "How much appium servers should works at same time")
@@ -346,8 +356,14 @@ func main() {
 	flag.IntVar(&ttl, "TTL", 300, "Max time (in seconds) which node or device might be in use")
 	flag.Parse()
 
+	if *version {
+		fmt.Println(appVersion)
+		os.Exit(0)
+	}
+
+	busyLimit = time.Duration(ttl) * time.Second
+
 	http.HandleFunc("/", defaultAction)
-	http.HandleFunc("/debug", debug)
 	http.HandleFunc("/getDevice", getDevice)
 	http.HandleFunc("/stopDevice", stopDevice)
 
