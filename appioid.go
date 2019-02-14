@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,36 +14,56 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/netutil"
 )
 
-// appVersion is the current application version
-const appVersion = "0.93"
+const (
+	appVersion         = "0.95"
+	host               = "http://127.0.0.1"
+	timeFormat         = "15:04:05"
+	unsupportedOsError = "Sory, not implemented for UNIX systems yet 😰"
+)
 
-// appiumState is an unexported type
+var (
+	poolSize       int
+	portCounter    int
+	ttl            int
+	appiodPort     string
+	reservedDevice string
+	busyLimit      time.Duration
+)
+
+// appiumState store short information about state
 type appiumState struct {
 	free bool
 	dob  time.Time
 }
 
-// deviceState is an unexported type
+// deviceState store short information about state + sysport
 type deviceState struct {
 	free bool
 	port string
 	dob  time.Time
 }
 
-var devicesPool = make(map[string]deviceState)
-var appiumsPool = make(map[string]appiumState)
+// PoolA map [name:state] + Mutex
+type PoolA struct {
+	sync.Mutex
+	pool map[string]appiumState
+}
 
-var poolSize, portCounter, ttl int
-var appiodPort, reservedDevice string
-var busyLimit time.Duration
+// PoolD map [name:state] + Mutex
+type PoolD struct {
+	sync.Mutex
+	pool map[string]deviceState
+}
 
-var host = "http://127.0.0.1"
-var timeFormat = "15:04:05"
-var unsupportedOsError = "Sory, not implemented for UNIX systems yet 😰"
+var appiums = &PoolA{
+	pool: make(map[string]appiumState),
+}
+
+var devices = &PoolD{
+	pool: make(map[string]deviceState),
+}
 
 func defaultAction(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w,
@@ -52,17 +71,43 @@ func defaultAction(w http.ResponseWriter, r *http.Request) {
 			"===========================================================\n"+
 			host+appiodPort+"/getDevice\n"+
 			host+appiodPort+"/stopDevice?name={deviceName}\n"+
-
+			"-----------------------------------------------------------\n"+
 			host+appiodPort+"/getAppium\n"+
 			host+appiodPort+"/stopAppium?port={number}\n"+
-
+			"-----------------------------------------------------------\n"+
 			host+appiodPort+"/status\n"+
+			host+appiodPort+"/allFree\n"+
+			"-----------------------------------------------------------\n"+
 			host+appiodPort+"/forceCleanUp\n"+
-			"===========================================================")
+			"===========================================================\n")
+}
+
+func getAppium(w http.ResponseWriter, r *http.Request) {
+	res := appiums.GetFree()
+	log.Printf("[DEBUG] /getAppium : %s", res)
+	fmt.Fprintf(w, res)
+}
+
+func stopAppium(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	target := ""
+	for k, v := range r.Form {
+		if k == "port" {
+			target = v[0]
+		}
+	}
+	if target == "" {
+		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n\t%s%s/stopAppium?port={number}", host, appiodPort)
+	} else {
+		log.Printf("[DEBUG] /stopAppium?port=%s", target)
+		fmt.Fprintf(w, appiums.SetFree(target))
+	}
 }
 
 func getDevice(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, discoverFreeDevice())
+	res := devices.GetFree()
+	log.Printf("[DEBUG] /getDevice : " + res)
+	fmt.Fprintf(w, res)
 }
 
 func stopDevice(w http.ResponseWriter, r *http.Request) {
@@ -74,69 +119,66 @@ func stopDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == "" {
-		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n_host_/stopDevice?name={deviceName}")
+		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n\t%s%s/stopDevice?name={deviceName}", host, appiodPort)
 	} else {
-		fmt.Fprintf(w, deviceSetFree(target))
-	}
-}
-
-func getAppium(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, discoverFreeAppium())
-}
-
-func stopAppium(w http.ResponseWriter, r *http.Request) {
-
-	r.ParseForm()
-	target := ""
-	for k, v := range r.Form {
-		if k == "port" {
-			target = v[0]
-		}
-	}
-	if target == "" {
-		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n_host_/stopAppium?port={number}")
-	} else {
-		fmt.Fprintf(w, appiumSetFree(target))
+		log.Printf("[DEBUG] /stopDevice?name=%s", target)
+		fmt.Fprintf(w, devices.SetFree(target))
 	}
 }
 
 func status(w http.ResponseWriter, r *http.Request) {
-	loadDevices()
 
 	fmt.Fprintf(w, "⌚️ %s\n\nActual appiums list:\n", time.Now().Format(timeFormat))
 	fmt.Fprintf(w, "|==============URL==============|=free?=|\n")
-	for a := range appiumsPool {
-		fmt.Fprintf(w, "| %-30s| %-5t | %s\n", appiumServerURL(a), appiumsPool[a].free, appiumStatus(a))
+	for a := range appiums.pool {
+		fmt.Fprintf(w, "| %-30s| %-5t | %s\n", appiumServerURL(a), appiums.pool[a].free, appiumStatus(a))
 	}
 	fmt.Fprintf(w, "-----------------------------------------\n\n")
 
+	devices.Refresh()
+
 	fmt.Fprintf(w, "Actual devices list:\n")
 	fmt.Fprintf(w, "|=============NAME==============|=port=|=free?=|\n")
-	for d := range devicesPool {
-		fmt.Fprintf(w, "| %-30s| %4s | %-5t |\n", d, devicesPool[d].port, devicesPool[d].free)
+	for d := range devices.pool {
+		fmt.Fprintf(w, "| %-30s| %4s | %-5t |\n", d, devices.pool[d].port, devices.pool[d].free)
 	}
 	fmt.Fprintf(w, "------------------------------------------------\n\n")
+}
+
+func allFree(w http.ResponseWriter, r *http.Request) {
+	// [!] not thread safe
+	result := true
+	for d := range devices.pool {
+		result = result && devices.pool[d].free
+	}
+	for a := range appiums.pool {
+		result = result && appiums.pool[a].free
+	}
+	fmt.Fprintf(w, "%v", result)
 }
 
 func forceCleanUp(w http.ResponseWriter, r *http.Request) {
 
 	begin := time.Now().Format(timeFormat)
-
 	log.Printf("==> [START] Force restart <==")
 
+	_, err := exec.Command("taskkill", "/F", "/IM", "node.exe").CombinedOutput()
+	if err != nil {
+		log.Println("[ERROR] Failed to start cmd: %v", err)
+	}
+
 	var wg sync.WaitGroup
-	wg.Add(len(appiumsPool))
-	for port := range appiumsPool {
+	wg.Add(len(appiums.pool))
+	for port := range appiums.pool {
 		go func(p string) {
 			defer wg.Done()
-			restart(p)
+			appiums.Restart(p)
 		}(port)
 	}
 	wg.Wait()
 
-	loadDevices()
-	for d := range devicesPool {
-		deviceSetFree(d)
+	for d := range devices.pool {
+		devices.SetFree(d)
 	}
 	log.Printf("==> [FINISH] Force restart <==")
 	end := time.Now().Format(timeFormat)
@@ -144,33 +186,118 @@ func forceCleanUp(w http.ResponseWriter, r *http.Request) {
 	status(w, r)
 }
 
-func appiumSetFree(appiumname string) string {
-	_, matched := appiumsPool[appiumname]
+// SetFree method for change status to free and update time
+func (a *PoolA) SetFree(name string) string {
+	a.Lock()
+	defer a.Unlock()
+
+	_, matched := a.pool[name]
 	if matched {
-		appiumsPool[appiumname] = appiumState{free: true, dob: time.Now()}
+		a.pool[name] = appiumState{free: true, dob: time.Now()}
 		return "OK"
 	}
-	return "UNKNOWN PORT"
+	return "UNKNOWN"
 }
 
-func appiumSetBusy(key string) {
-	appiumsPool[key] = appiumState{free: false, dob: time.Now()}
+// GetFree search for free appium in pool and returns
+func (a *PoolA) GetFree() string {
+	a.Lock()
+	defer a.Unlock()
+
+	for port := range a.pool {
+		if appiumStatus(port) == "ERR" {
+			a.Restart(port)
+			continue
+		}
+		if !a.pool[port].free && time.Now().Sub(a.pool[port].dob) > busyLimit {
+			log.Printf("[WARN] appium:%s TTL elapsed", port)
+			a.Restart(port)
+			continue
+		}
+		if a.pool[port].free {
+			a.pool[port] = appiumState{free: false, dob: time.Now()}
+			return appiumServerURL(port)
+		}
+	}
+	return "WAIT"
 }
 
-func deviceSetFree(devicename string) string {
-	_, matched := devicesPool[devicename]
+// SetFree method for change status to free and update time
+func (d *PoolD) SetFree(name string) string {
+	d.Lock()
+	defer d.Unlock()
+
+	_, matched := d.pool[name]
 	if matched {
-		systemPort := devicesPool[devicename].port
-		killProcess(systemPort)
-		devicesPool[devicename] = deviceState{free: true, port: systemPort, dob: time.Now()}
+		systemPort := d.pool[name].port
+		//killProcess(systemPort) //TODO: is it necessary??
+		d.pool[name] = deviceState{free: true, port: systemPort, dob: time.Now()}
 		return "OK"
 	}
-	return "UNKNOWN DEVICE NAME"
+	return "UNKNOWN"
 }
 
-func deviceSetBusy(devicename string) {
-	systemPort := devicesPool[devicename].port
-	devicesPool[devicename] = deviceState{free: false, port: systemPort, dob: time.Now()}
+// GetFree search for free device in pool and returns
+func (d *PoolD) GetFree() string {
+	d.Lock()
+	defer d.Unlock()
+
+	d.Refresh()
+
+	for name := range devices.pool {
+
+		if !d.pool[name].free && time.Now().Sub(d.pool[name].dob) > busyLimit {
+			log.Printf("[WARN] device '%s' TTL elapsed", name)
+			d.SetFree(name)
+			continue
+		}
+		if d.pool[name].free {
+			systemPort := d.pool[name].port
+			d.pool[name] = deviceState{free: false, port: systemPort, dob: time.Now()}
+			return (name + " " + d.pool[name].port)
+		}
+	}
+	return "WAIT"
+}
+
+// Refresh search for new devices and delete outdated
+func (d *PoolD) Refresh() {
+	out, _ := exec.Command("adb", "devices").CombinedOutput()
+	exp, _ := regexp.Compile(`(.*)\s+device\s`)
+	devs := exp.FindAllStringSubmatch(string(out), -1)
+
+	adbListing := make(map[string]struct{})
+
+	// stage1: find new devices and record to pool
+	for _, elem := range devs {
+		devName := elem[1] // first group from regexp match
+		if devName == reservedDevice {
+			continue
+		}
+		adbListing[devName] = struct{}{}
+
+		_, registred := d.pool[devName]
+		if !registred {
+			d.pool[devName] = deviceState{port: strconv.Itoa(portCounter), free: true, dob: time.Now()}
+			portCounter++
+		}
+	}
+
+	// stage2: find disconnected devices and remove from devicesPool
+	for devFromPool := range d.pool {
+		_, online := adbListing[devFromPool]
+		if !online {
+			killProcess(d.pool[devFromPool].port)
+			delete(d.pool, devFromPool)
+		}
+	}
+}
+
+// Restart kill (if exist) old process and start new one
+func (a *PoolA) Restart(port string) {
+	log.Printf("[DEBUG] restart %s", appiumServerURL(port))
+	killProcess(port)
+	startNode(port)
 }
 
 func appiumStatus(port string) string {
@@ -197,49 +324,19 @@ func appiumIsReady(port string) bool {
 	return (appiumStatus(port) != "ERR")
 }
 
-func discoverFreeDevice() string {
-	loadDevices()
-	for name := range devicesPool {
-		if devicesPool[name].free {
-			deviceSetBusy(name)
-			return (name + " " + devicesPool[name].port)
-		}
-	}
-	return "WAIT"
-}
-
-func discoverFreeAppium() string {
-	for port := range appiumsPool {
-		if appiumStatus(port) == "ERR" {
-			restart(port)
-			continue
-		}
-		if !appiumsPool[port].free && time.Now().Sub(appiumsPool[port].dob) > busyLimit {
-			log.Printf("[WARN] appium:%s TTL elapsed", port)
-			restart(port)
-			continue
-		}
-		if appiumsPool[port].free {
-			appiumSetBusy(port)
-			return appiumServerURL(port)
-		}
-	}
-	return "WAIT"
-}
-
 func appiumServerURL(port string) string {
 	return host + ":" + port + "/wd/hub"
 }
 
-func startAppiumNode(port string) {
-	cmd := exec.Command("appium", "-p", port, "--log-level", "error")
-	if err := cmd.Start(); err == nil {
+func startNode(port string) {
+
+	if err := exec.Command("appium", "-p", port, "--log-level", "error").Start(); err == nil {
 		if appiumIsReady(port) {
-			log.Printf("[DONE] appium:%s started", port)
-			appiumsPool[port] = appiumState{free: true, dob: time.Now()}
+			log.Printf("[DONE] started %s", appiumServerURL(port))
+			appiums.pool[port] = appiumState{free: true, dob: time.Now()}
 		} else {
-			log.Printf("[ERROR] appium:%s started but not responding", port)
-			appiumsPool[port] = appiumState{free: false, dob: time.Now().Add(-1 * time.Hour)}
+			log.Printf("[WARN] started %s but not responding", appiumServerURL(port))
+			appiums.pool[port] = appiumState{free: false, dob: time.Now().Add(-1 * time.Hour)}
 		}
 	} else {
 		log.Printf("[ERROR] Failed to start cmd: %v", err)
@@ -247,68 +344,25 @@ func startAppiumNode(port string) {
 }
 
 func initialLoad() {
-
-	log.Printf("[INIT] appioid started")
-
 	var wg sync.WaitGroup
 	wg.Add(poolSize)
+
+	log.Printf("[INIT] Appioid started")
 	for i := 0; i < poolSize; i++ {
 		go func(num int) {
 			defer wg.Done()
-			startAppiumNode(strconv.Itoa(num))
+			startNode(strconv.Itoa(num))
 		}(portCounter)
 		portCounter++
 	}
 	wg.Wait()
 
-	loadDevices()
-}
-
-func loadDevices() {
-	cmd := exec.Command("adb", "devices")
-	out, _ := cmd.CombinedOutput()
-	cmdRes := string(out)
-	r, _ := regexp.Compile(`(.*)\s+device\s`)
-	devs := r.FindAllStringSubmatch(cmdRes, -1)
-
-	adbListing := make(map[string]struct{})
-
-	// stage1: find new devices and record to devicesPool
-	for _, elem := range devs {
-		devName := elem[1] // first group from regexp match
-		if devName == reservedDevice {
-			continue
-		}
-		adbListing[devName] = struct{}{}
-
-		_, registred := devicesPool[devName]
-		if !registred {
-			devicesPool[devName] = deviceState{port: strconv.Itoa(portCounter), free: true, dob: time.Now()}
-			portCounter++
-		}
-	}
-
-	// stage2: find disconnected devices and remove from devicesPool
-	for devFromPool := range devicesPool {
-		_, online := adbListing[devFromPool]
-		if !online {
-			delete(devicesPool, devFromPool)
-		}
-	}
-
-	// stage3: check for devices which is busy more than busyLimit
-	for actualDevice := range devicesPool {
-		if !devicesPool[actualDevice].free && time.Now().Sub(devicesPool[actualDevice].dob) > busyLimit {
-			log.Printf("[WARN] device '%s' TTL elapsed", actualDevice)
-			deviceSetFree(actualDevice)
-		}
-	}
+	devices.Refresh()
 }
 
 func getPidByPort(p string) string {
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("netstat", "-ano")
-		out, _ := cmd.CombinedOutput()
+		out, _ := exec.Command("netstat", "-ano").CombinedOutput()
 		pattern := strings.Join([]string{`TCP.*[:]`, p, `\s+.*LISTENING\s+(\d+)`}, "")
 		r, _ := regexp.Compile(pattern)
 
@@ -327,10 +381,9 @@ func killPid(id string) {
 		return // no pid -- no action
 	}
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("taskkill", "/F", "/pid", id)
-		_, err := cmd.CombinedOutput()
+		_, err := exec.Command("taskkill", "/F", "/pid", id).CombinedOutput()
 		if err == nil {
-			log.Println("[DONE] taskkill /F /pid " + id)
+			log.Println("[DONE] taskkill /F /pid %s", id)
 		}
 	} else {
 		log.Fatal(unsupportedOsError)
@@ -341,17 +394,11 @@ func killProcess(port string) {
 	killPid(getPidByPort(port))
 }
 
-func restart(appiumPort string) {
-	killProcess(appiumPort)
-	startAppiumNode(appiumPort)
-}
-
 func main() {
-
 	version := flag.Bool("v", false, "Prints current appioid version")
 	flag.StringVar(&appiodPort, "p", ":9093", "Port to listen on, don't forget colon at start")
 	flag.StringVar(&reservedDevice, "rd", "", "Reserved device (never be returned by /getDevice)")
-	flag.IntVar(&poolSize, "sz", 1, "How much appium servers should works at same time")
+	flag.IntVar(&poolSize, "sz", 2, "How much appium servers should works at same time")
 	flag.IntVar(&portCounter, "first", 4725, "First value of portCounter")
 	flag.IntVar(&ttl, "TTL", 300, "Max time (in seconds) which node or device might be in use")
 	flag.Parse()
@@ -364,6 +411,7 @@ func main() {
 	busyLimit = time.Duration(ttl) * time.Second
 
 	http.HandleFunc("/", defaultAction)
+
 	http.HandleFunc("/getDevice", getDevice)
 	http.HandleFunc("/stopDevice", stopDevice)
 
@@ -371,18 +419,11 @@ func main() {
 	http.HandleFunc("/stopAppium", stopAppium)
 
 	http.HandleFunc("/status", status)
+	http.HandleFunc("/allFree", allFree)
 	http.HandleFunc("/forceCleanUp", forceCleanUp)
 
 	initialLoad()
 
-	flow, err := net.Listen("tcp", appiodPort)
-	if err != nil {
-		log.Fatal("Listen: ", err)
-	}
-	defer flow.Close()
-
-	flow = netutil.LimitListener(flow, 1)
-
-	log.Fatal(http.Serve(flow, nil))
+	log.Fatal(http.ListenAndServe(appiodPort, nil))
 
 }
