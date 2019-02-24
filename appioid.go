@@ -58,18 +58,18 @@ var devices = &PoolD{pool: make(map[string]State)}
 func defaultAction(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w,
 		"You can use this commands \n"+
-			"===========================================================\n"+
-			host+appiodPort+"/getDevice\n"+
-			host+appiodPort+"/stopDevice?name={deviceName}\n"+
-			"-----------------------------------------------------------\n"+
-			host+appiodPort+"/getAppium\n"+
-			host+appiodPort+"/stopAppium?port={number}\n"+
-			"-----------------------------------------------------------\n"+
-			host+appiodPort+"/status\n"+
-			host+appiodPort+"/allFree\n"+
-			"-----------------------------------------------------------\n"+
-			host+appiodPort+"/forceCleanUp\n"+
-			"===========================================================\n")
+			"═══════════════════════════════════════════════════════════\n"+
+			" "+host+appiodPort+"/getDevice\n"+
+			" "+host+appiodPort+"/stopDevice?name={deviceName}\n"+
+			"───────────────────────────────────────────────────────────\n"+
+			" "+host+appiodPort+"/getAppium\n"+
+			" "+host+appiodPort+"/stopAppium?port={number}\n"+
+			"───────────────────────────────────────────────────────────\n"+
+			" "+host+appiodPort+"/status\n"+
+			" "+host+appiodPort+"/allFree\n"+
+			"───────────────────────────────────────────────────────────\n"+
+			" "+host+appiodPort+"/forceCleanUp\n"+
+			"═══════════════════════════════════════════════════════════\n")
 }
 
 func getAppium(w http.ResponseWriter, r *http.Request) {
@@ -119,20 +119,20 @@ func stopDevice(w http.ResponseWriter, r *http.Request) {
 func status(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "⌚️ %s\n\nActual appiums list:\n", time.Now().Format(timeFormat))
-	fmt.Fprintf(w, "|==============URL==============|=free?=|\n")
+	fmt.Fprintf(w, "╔══════════════URL══════════════╦═free?═╗\n")
 	for a := range appiums.pool {
-		fmt.Fprintf(w, "| %-30s| %-5t | %s\n", appiumServerURL(a), appiums.pool[a].free, appiumStatus(a))
+		fmt.Fprintf(w, "║ %-30s║ %-5t ║ %s\n", appiumServerURL(a), appiums.pool[a].free, appiumStatus(a))
 	}
-	fmt.Fprintf(w, "-----------------------------------------\n\n")
+	fmt.Fprintf(w, "╚═══════════════════════════════╩═══════╝\n\n")
 
 	devices.Refresh()
 
 	fmt.Fprintf(w, "Actual devices list:\n")
-	fmt.Fprintf(w, "|=============NAME==============|=free?=|=port=|\n")
+	fmt.Fprintf(w, "╔═════════════NAME══════════════╦═free?═╦═port═╗\n")
 	for d := range devices.pool {
-		fmt.Fprintf(w, "| %-30s| %-5t | %4s |\n", d, devices.pool[d].free, devices.pool[d].port)
+		fmt.Fprintf(w, "║ %-30s║ %-5t ║ %4s ║\n", d, devices.pool[d].free, devices.pool[d].port)
 	}
-	fmt.Fprintf(w, "------------------------------------------------\n\n")
+	fmt.Fprintf(w, "╚═══════════════════════════════╩═══════╩══════╝\n\n")
 }
 
 func allFree(w http.ResponseWriter, r *http.Request) {
