@@ -1,4 +1,4 @@
-# Appiod
+# Appioid
 Tool for manage android devices and appium servers
 
 ## Requirements
