@@ -13,7 +13,7 @@ Tool for manage android devices and appium servers
 ## Appioid arguments
 | Flag   | Default | Description                                                         |
 | ------ |:-------:| ------------------------------------------------------------------- |
-| `-p`   | :9093   | Port to listen on                                                   |
+| `-p`   | 9093    | Port to listen on                                                   |
 | `-sz`  | 2       | How much appium servers should works at same time                   |
 | `-TTL` | 300     | Max time (in seconds) which node or device might be in use          |
 | `-rd`  |         | Reserved device (This deviceName never be returned by `/getDevice`) |

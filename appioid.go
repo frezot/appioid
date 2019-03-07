@@ -14,11 +14,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/frezot/appioid/utils"
 )
 
 const (
-	appVersion         = "0.95"
-	host               = "http://127.0.0.1"
+	appVersion         = "0.96"
 	timeFormat         = "15:04:05"
 	unsupportedOsError = "Sory, not implemented for UNIX systems yet 😰"
 )
@@ -28,7 +29,8 @@ var (
 	appiumPort     int
 	systemPort     int // http://appium.io/docs/en/writing-running-appium/caps/
 	ttl            int
-	appiodPort     string
+	baseURL        string
+	appioidPort    string
 	reservedDevice string
 	busyLimit      time.Duration
 )
@@ -59,16 +61,16 @@ func defaultAction(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w,
 		"You can use this commands \n"+
 			"═══════════════════════════════════════════════════════════\n"+
-			" "+host+appiodPort+"/getDevice\n"+
-			" "+host+appiodPort+"/stopDevice?name={deviceName}\n"+
+			" "+baseURL+"/getDevice\n"+
+			" "+baseURL+"/stopDevice?name={deviceName}\n"+
 			"───────────────────────────────────────────────────────────\n"+
-			" "+host+appiodPort+"/getAppium\n"+
-			" "+host+appiodPort+"/stopAppium?port={number}\n"+
+			" "+baseURL+"/getAppium\n"+
+			" "+baseURL+"/stopAppium?port={number}\n"+
 			"───────────────────────────────────────────────────────────\n"+
-			" "+host+appiodPort+"/status\n"+
-			" "+host+appiodPort+"/allFree\n"+
+			" "+baseURL+"/status\n"+
+			" "+baseURL+"/allFree\n"+
 			"───────────────────────────────────────────────────────────\n"+
-			" "+host+appiodPort+"/forceCleanUp\n"+
+			" "+baseURL+"/forceCleanUp\n"+
 			"═══════════════════════════════════════════════════════════\n")
 }
 
@@ -87,7 +89,7 @@ func stopAppium(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == "" {
-		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n\t%s%s/stopAppium?port={number}", host, appiodPort)
+		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n\t%s/stopAppium?port={number}", baseURL)
 	} else {
 		log.Printf("[DEBUG] /stopAppium?port=%s", target)
 		fmt.Fprintf(w, appiums.SetFree(target))
@@ -109,7 +111,7 @@ func stopDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == "" {
-		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n\t%s%s/stopDevice?name={deviceName}", host, appiodPort)
+		fmt.Fprintf(w, "INCORRECT REQUEST \nExpected form: \n\t%s/stopDevice?name={deviceName}", baseURL)
 	} else {
 		log.Printf("[DEBUG] /stopDevice?name=%s", target)
 		fmt.Fprintf(w, devices.SetFree(target))
@@ -121,7 +123,7 @@ func status(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "⌚️ %s\n\nActual appiums list:\n", time.Now().Format(timeFormat))
 	fmt.Fprintf(w, "╔══════════════URL══════════════╦═free?═╗\n")
 	for a := range appiums.pool {
-		fmt.Fprintf(w, "║ %-30s║ %-5t ║ %s\n", appiumServerURL(a), appiums.pool[a].free, appiumStatus(a))
+		fmt.Fprintf(w, "║ %-30s║ %-5t ║ %s\n", utils.AppiumServerURL(a), appiums.pool[a].free, appiumStatus(a))
 	}
 	fmt.Fprintf(w, "╚═══════════════════════════════╩═══════╝\n\n")
 
@@ -208,7 +210,7 @@ func (a *PoolA) GetFree() string {
 		if a.pool[port].free {
 			bp := a.pool[port].port
 			a.pool[port] = State{free: false, port: bp, dob: time.Now()}
-			return appiumServerURL(port)
+			return utils.AppiumServerURL(port)
 		}
 	}
 	return "WAIT"
@@ -285,9 +287,9 @@ func (d *PoolD) Refresh() {
 	}
 }
 
-// Restart kill (if exist) old process and start new one
+// Restart will kill (if exist) old process and start new one
 func (a *PoolA) Restart(p string) {
-	log.Printf("[DEBUG] restart %s", appiumServerURL(p))
+	log.Printf("[DEBUG] restart %s", utils.AppiumServerURL(p))
 	killProcess(p)
 	bp := a.pool[p].port
 	killProcess(bp)
@@ -295,7 +297,7 @@ func (a *PoolA) Restart(p string) {
 }
 
 func appiumStatus(port string) string {
-	response, err := http.Get(appiumServerURL(port) + "/status")
+	response, err := http.Get(utils.AppiumServerURL(port) + "/status")
 	if err == nil {
 		defer response.Body.Close()
 		responseData, _ := ioutil.ReadAll(response.Body)
@@ -318,18 +320,14 @@ func appiumIsReady(port string) bool {
 	return (appiumStatus(port) != "ERR")
 }
 
-func appiumServerURL(port string) string {
-	return host + ":" + port + "/wd/hub"
-}
-
 func startNode(port string, bp string) {
 
 	if err := exec.Command("appium", "-p", port, "-bp", bp, "--log-level", "error", "--session-override").Start(); err == nil {
 		if appiumIsReady(port) {
-			log.Printf("[DONE] started %s", appiumServerURL(port))
+			log.Printf("[DONE] started %s", utils.AppiumServerURL(port))
 			appiums.pool[port] = State{free: true, port: bp, dob: time.Now()}
 		} else {
-			log.Printf("[WARN] started %s but not responding", appiumServerURL(port))
+			log.Printf("[WARN] started %s but not responding", utils.AppiumServerURL(port))
 			appiums.pool[port] = State{free: false, port: bp, dob: time.Now().Add(-1 * time.Hour)}
 		}
 	} else {
@@ -390,7 +388,7 @@ func killProcess(port string) {
 
 func main() {
 	version := flag.Bool("v", false, "Prints current appioid version")
-	flag.StringVar(&appiodPort, "p", ":9093", "Port to listen on, don't forget colon at start")
+	flag.StringVar(&appioidPort, "p", "9093", "Port to listen on")
 	flag.StringVar(&reservedDevice, "rd", "", "Reserved device (never be returned by /getDevice)")
 	flag.IntVar(&poolSize, "sz", 2, "How much appium servers should works at same time")
 	flag.IntVar(&appiumPort, "ap", 4725, "First value of appiumPort counter")
@@ -404,6 +402,7 @@ func main() {
 	}
 
 	busyLimit = time.Duration(ttl) * time.Second
+	baseURL = utils.BuildAppioidBaseURL(appioidPort)
 
 	http.HandleFunc("/", defaultAction)
 
@@ -419,6 +418,6 @@ func main() {
 
 	initialLoad()
 
-	log.Fatal(http.ListenAndServe(appiodPort, nil))
+	log.Fatal(http.ListenAndServe(":"+appioidPort, nil))
 
 }
