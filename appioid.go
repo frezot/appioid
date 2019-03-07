@@ -3,18 +3,16 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/frezot/appioid/cmds"
 	"github.com/frezot/appioid/utils"
 )
 
@@ -123,7 +121,7 @@ func status(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "⌚️ %s\n\nActual appiums list:\n", time.Now().Format(timeFormat))
 	fmt.Fprintf(w, "╔══════════════URL══════════════╦═free?═╗\n")
 	for a := range appiums.pool {
-		fmt.Fprintf(w, "║ %-30s║ %-5t ║ %s\n", utils.AppiumServerURL(a), appiums.pool[a].free, appiumStatus(a))
+		fmt.Fprintf(w, "║ %-30s║ %-5t ║ %s\n", utils.AppiumServerURL(a), appiums.pool[a].free, utils.AppiumStatus(a))
 	}
 	fmt.Fprintf(w, "╚═══════════════════════════════╩═══════╝\n\n")
 
@@ -198,7 +196,7 @@ func (a *PoolA) GetFree() string {
 	defer a.Unlock()
 
 	for port := range a.pool {
-		if appiumStatus(port) == "ERR" {
+		if utils.AppiumStatus(port) == "ERR" {
 			a.Restart(port)
 			continue
 		}
@@ -224,7 +222,7 @@ func (d *PoolD) SetFree(name string) string {
 	_, matched := d.pool[name]
 	if matched {
 		systemPort := d.pool[name].port
-		//killProcess(systemPort) //TODO: is it necessary??
+		// cmds.KillProcess(systemPort) //TODO: is it necessary??
 		d.pool[name] = State{free: true, port: systemPort, dob: time.Now()}
 		return "OK"
 	}
@@ -281,7 +279,7 @@ func (d *PoolD) Refresh() {
 	for devFromPool := range d.pool {
 		_, online := adbListing[devFromPool]
 		if !online {
-			killProcess(d.pool[devFromPool].port)
+			cmds.KillProcess(d.pool[devFromPool].port)
 			delete(d.pool, devFromPool)
 		}
 	}
@@ -290,20 +288,10 @@ func (d *PoolD) Refresh() {
 // Restart will kill (if exist) old process and start new one
 func (a *PoolA) Restart(p string) {
 	log.Printf("[DEBUG] restart %s", utils.AppiumServerURL(p))
-	killProcess(p)
+	cmds.KillProcess(p)
 	bp := a.pool[p].port
-	killProcess(bp)
+	cmds.KillProcess(bp)
 	startNode(p, bp)
-}
-
-func appiumStatus(port string) string {
-	response, err := http.Get(utils.AppiumServerURL(port) + "/status")
-	if err == nil {
-		defer response.Body.Close()
-		responseData, _ := ioutil.ReadAll(response.Body)
-		return string(responseData)
-	}
-	return "ERR"
 }
 
 func appiumIsReady(port string) bool {
@@ -311,13 +299,13 @@ func appiumIsReady(port string) bool {
 	singleLatency := 6 //experimentally established value
 
 	for i := 0; i < singleLatency*poolSize; i++ {
-		if appiumStatus(port) == "ERR" {
+		if utils.AppiumStatus(port) == "ERR" {
 			time.Sleep(500 * time.Millisecond)
 		} else {
 			return true
 		}
 	}
-	return (appiumStatus(port) != "ERR")
+	return (utils.AppiumStatus(port) != "ERR")
 }
 
 func startNode(port string, bp string) {
@@ -350,40 +338,6 @@ func initialLoad() {
 	wg.Wait()
 
 	devices.Refresh()
-}
-
-func getPidByPort(p string) string {
-	if runtime.GOOS == "windows" {
-		out, _ := exec.Command("netstat", "-ano").CombinedOutput()
-		pattern := strings.Join([]string{`TCP.*[:]`, p, `\s+.*LISTENING\s+(\d+)`}, "")
-		r, _ := regexp.Compile(pattern)
-
-		if len(r.FindStringSubmatch(string(out))) == 0 {
-			return ""
-		}
-		pid := r.FindStringSubmatch(string(out))[1]
-		return pid
-	}
-	log.Fatal(unsupportedOsError)
-	return ""
-}
-
-func killPid(id string) {
-	if id == "" {
-		return // no pid -- no action
-	}
-	if runtime.GOOS == "windows" {
-		_, err := exec.Command("taskkill", "/F", "/pid", id).CombinedOutput()
-		if err == nil {
-			log.Println("[DONE] taskkill /F /pid ", id)
-		}
-	} else {
-		log.Fatal(unsupportedOsError)
-	}
-}
-
-func killProcess(port string) {
-	killPid(getPidByPort(port))
 }
 
 func main() {
