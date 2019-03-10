@@ -11,20 +11,16 @@ import (
 	"github.com/frezot/appioid/settings"
 )
 
-// Devices can manage pool of Android devices
+// Devices - entity that can manage pool of Android devices
 var Devices = devices.NewPoolD()
 
-// Appiums can manage pool of Appium servers
+// Appiums - entity that can manage pool of Appium servers
 var Appiums = appiums.NewPoolA()
 
-// Initialization do everything that should happend on start
+// Initialization - do everything that should happend on start
 func Initialization(ttl int) {
-
-	settings.BusyLimit = time.Duration(ttl) * time.Second
-
 	log.Printf("[INIT] Appioid started")
-
-	Devices.Refresh()
+	settings.BusyLimit = time.Duration(ttl) * time.Second
 
 	var wg sync.WaitGroup
 	wg.Add(settings.PoolSize)
@@ -36,4 +32,6 @@ func Initialization(ttl int) {
 		settings.AppiumPort += 2
 	}
 	wg.Wait()
+
+	Devices.Refresh()
 }

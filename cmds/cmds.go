@@ -1,6 +1,7 @@
 package cmds
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
 	"regexp"
@@ -43,4 +44,26 @@ func getPidByPort(p string) string {
 	}
 	log.Fatal(unsupportedOsError)
 	return ""
+}
+
+// WipeAppiumTools - remove appium relates apk-s from device
+func WipeAppiumTools(d string) {
+	result := fmt.Sprintf("device '%s'", d)
+
+	if err := exec.Command("adb", "-s", d, "uninstall", "io.appium.uiautomator2.server").Start(); err != nil {
+		result += fmt.Sprintf(" [ERR] %v", err)
+	} else {
+		result += " [OK]"
+	}
+	if err := exec.Command("adb", "-s", d, "uninstall", "io.appium.uiautomator2.server.test").Start(); err != nil {
+		result += fmt.Sprintf(" [ERR] %v", err)
+	} else {
+		result += " [OK]"
+	}
+	if err := exec.Command("adb", "-s", d, "uninstall", "io.appium.settings").Start(); err != nil {
+		result += fmt.Sprintf(" [ERR] %v", err)
+	} else {
+		result += " [OK]"
+	}
+	log.Printf(result)
 }

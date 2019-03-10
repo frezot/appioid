@@ -25,7 +25,7 @@ type PoolD struct {
 	pool map[string]state
 }
 
-// NewPoolD smth like constructor
+// NewPoolD creates new PoolD
 func NewPoolD() *PoolD {
 	return &PoolD{pool: make(map[string]state)}
 }
@@ -50,8 +50,9 @@ func (d *PoolD) AllFree() bool {
 
 // ForceCleanUp mark each device as free
 func (d *PoolD) ForceCleanUp() {
+	d.Refresh()
 	for name := range d.pool {
-		//TODO remove uiAutomator
+		cmds.WipeAppiumTools(name)
 		d.SetFree(name)
 	}
 }

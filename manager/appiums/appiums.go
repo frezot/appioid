@@ -24,7 +24,7 @@ type PoolA struct {
 	pool map[string]state
 }
 
-// NewPoolA smth like constructor
+// NewPoolA creates new PoolA
 func NewPoolA() *PoolA {
 	return &PoolA{pool: make(map[string]state)}
 }
