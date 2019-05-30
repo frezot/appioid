@@ -25,7 +25,7 @@ func killPid(id string) {
 		if err == nil {
 			log.Println("[DONE] taskkill /F /pid ", id)
 		}
-	} else if runtime.GOOS == "linux" {
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		_, err := exec.Command("kill", id).CombinedOutput()
 		if err == nil {
 			log.Println("[DONE] kill ", id)
@@ -46,7 +46,7 @@ func getPidByPort(p string) string {
 		}
 		pid := r.FindStringSubmatch(string(out))[1]
 		return pid
-	} else if runtime.GOOS == "linux" {
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		out, _ := exec.Command("lsof", "-ti:"+p).CombinedOutput()
 		return string(out)
 	} else {
