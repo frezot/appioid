@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	appVersion = "0.97"
+	appVersion = "0.98"
 	timeFormat = "15:04:05"
 )
 

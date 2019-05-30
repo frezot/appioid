@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const unsupportedOsError = "Sory, not implemented for UNIX systems yet 😰"
+const unsupportedOsError = "[FATAL] Unsupported OS: " + runtime.GOOS
 
 // KillProcess find pid by LISTENING port and terminate
 func KillProcess(port string) {
@@ -24,6 +24,11 @@ func killPid(id string) {
 		_, err := exec.Command("taskkill", "/F", "/pid", id).CombinedOutput()
 		if err == nil {
 			log.Println("[DONE] taskkill /F /pid ", id)
+		}
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		_, err := exec.Command("kill", id).CombinedOutput()
+		if err == nil {
+			log.Println("[DONE] kill ", id)
 		}
 	} else {
 		log.Fatal(unsupportedOsError)
@@ -41,9 +46,13 @@ func getPidByPort(p string) string {
 		}
 		pid := r.FindStringSubmatch(string(out))[1]
 		return pid
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		out, _ := exec.Command("lsof", "-ti:"+p).CombinedOutput()
+		return string(out)
+	} else {
+		log.Fatal(unsupportedOsError)
+		return ""
 	}
-	log.Fatal(unsupportedOsError)
-	return ""
 }
 
 // WipeAppiumTools - remove appium relates apk-s from device
